@@ -8,30 +8,37 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: "Bad prompt" });
   }
 
-  const model = process.env.GEMINI_MODEL || "gemini-flash-latest";
-  try {
-    const r = await fetch(
-      "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: "application/json", maxOutputTokens: 16384 },
-        }),
+  // If one model is busy, the next one is tried.
+  const models = ["gemini-3.5-flash-lite", "gemini-flash-latest", "gemini-3.1-flash-lite"];
+  if (process.env.GEMINI_MODEL) models.unshift(process.env.GEMINI_MODEL);
+
+  let lastStatus = 502;
+  for (const model of models) {
+    try {
+      const r = await fetch(
+        "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }] }],
+            generationConfig: { responseMimeType: "application/json", maxOutputTokens: 16384 },
+          }),
+        }
+      );
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        console.error("Gemini error", model, r.status, JSON.stringify(data).slice(0, 300));
+        lastStatus = r.status;
+        continue;
       }
-    );
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      console.error("Gemini error", r.status, JSON.stringify(data).slice(0, 500));
-      return res.status(r.status === 429 ? 429 : 502).json({ error: "AI request failed" });
+      const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
+      const text = parts.map((p) => p.text || "").join("");
+      if (text) return res.status(200).json({ text });
+      console.error("Empty answer from", model);
+    } catch (e) {
+      console.error("Request failed", model, e);
     }
-    const parts = (((data.candidates || [])[0] || {}).content || {}).parts || [];
-    const text = parts.map((p) => p.text || "").join("");
-    if (!text) return res.status(502).json({ error: "Empty answer" });
-    return res.status(200).json({ text });
-  } catch (e) {
-    console.error(e);
-    return res.status(502).json({ error: "AI request failed" });
   }
+  return res.status(lastStatus === 429 ? 429 : 502).json({ error: "AI request failed" });
 };
